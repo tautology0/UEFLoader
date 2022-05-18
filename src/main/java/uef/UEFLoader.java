@@ -15,9 +15,15 @@
  */
 package uef;
 
+import java.io.FileInputStream;
+import java.io.FileReader;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.*;
 
+import com.google.gson.Gson;
+
+import ghidra.framework.Application;
 import ghidra.app.util.Option;
 import ghidra.app.util.bin.BinaryReader;
 import ghidra.app.util.bin.ByteArrayProvider;
@@ -27,6 +33,8 @@ import ghidra.app.util.opinion.AbstractLibrarySupportLoader;
 import ghidra.app.util.opinion.LoadSpec;
 import ghidra.framework.model.DomainObject;
 import ghidra.program.flatapi.FlatProgramAPI;
+import ghidra.program.model.data.DataType;
+import ghidra.program.model.data.Pointer16DataType;
 import ghidra.program.model.lang.LanguageCompilerSpecPair;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.mem.MemoryBlock;
@@ -39,6 +47,16 @@ import ghidra.util.task.TaskMonitor;
  */
 public class UEFLoader extends AbstractLibrarySupportLoader {
 
+	private String getROMPath() throws IOException {
+		String path = Application.getModuleDataFile("os12.rom").toString();
+		return path;
+	}
+	
+	private String getVariablePath() throws IOException {
+		String path = Application.getModuleDataFile("labels.json").toString();
+		return path;
+	}
+	
 	@Override
 	public String getName() {
 		return "UEF";
@@ -65,6 +83,14 @@ public class UEFLoader extends AbstractLibrarySupportLoader {
 			Program program, TaskMonitor monitor, MessageLog log)
 			throws CancelledException, IOException {
 
+		// Load in the OS file
+		InputStream ROMFile = new FileInputStream(getROMPath());
+		byte []ROMdata = ROMFile.readAllBytes();
+		
+		// Load in the predefined OS labels and functions
+		Gson gson = new Gson();
+		BBCLabel[] labels = gson.fromJson(new FileReader(getVariablePath()), BBCLabel[].class);
+
 		// Read the file
 		BinaryReader reader = new BinaryReader(provider, true);
 		FlatProgramAPI api = new FlatProgramAPI(program, monitor);
@@ -74,14 +100,9 @@ public class UEFLoader extends AbstractLibrarySupportLoader {
 		// Now we have it loaded - it's time to create some objects
 		try {
 			if (UEFFile.ram != null) api.createMemoryBlock("RAM", api.toAddr(0), UEFFile.ram, false);
-			if (UEFFile.rom != null) {
-				api.createMemoryBlock("ROM", api.toAddr(0), UEFFile.rom, true);
-			}
-			else {
-				MemoryBlock block = program.getMemory().createInitializedBlock("ROM", api.toAddr(0xC000), 0x4000, (byte) 0x00, null, false);
-				block.setRead(true);
-				block.setExecute(true);
-			}
+			MemoryBlock block = api.createMemoryBlock("ROM", api.toAddr(0xC000), ROMdata, false);
+			block.setRead(true);
+			block.setExecute(true);
 			
 			if ((UEFFile.cpustate.PC & 0xffff) < 0x8000) {
 				// PC is in RAM so add it as an Entrypoint
@@ -89,8 +110,18 @@ public class UEFLoader extends AbstractLibrarySupportLoader {
 			}
 			
 			// Create some standard functions
-			api.createFunction(api.toAddr(0xfff4),"OSBYTE");
-			api.createFunction(api.toAddr(0xfff1),"OSBYTE");
+			for (BBCLabel label : labels) {
+				switch(label.getType()) {
+				case "Function":
+					api.createFunction(api.toAddr(label.getAddress()), label.getName());
+					break;
+					
+				case "Pointer":
+					api.createData(api.toAddr(label.getAddress()), Pointer16DataType.dataType);
+					api.createLabel(api.toAddr(label.getAddress()), label.getName(), true);
+					break;
+				}
+			}
 			
 		} catch (Exception e) {
 			Msg.error(this, e.getMessage());
